@@ -1,0 +1,257 @@
+#!/bin/sh
+
+# Solution description:
+#  1. partition and format the USB stick
+#  2. copy all the files in iso image into the new partition
+#  3. setup grub on the USB stick
+
+# Dependency:
+#  * >=bash-4.0   use its buildin regexp and associative array
+#  * coreutils    use mktemp
+#  * util-linux   use blkid,fdisk
+#  * p7zip        extrace file from ISO
+#  * cdrtools     use isoinfo
+#  * ntfs-3g      format partition to ntfs
+#  * >=grub-2.0
+
+##########################################################
+# util functions
+
+setColorVars() {
+    if [ "${USECOLOR}" == 1 ] ; then
+        GOOD=$'\e[32;01m'
+        WARN=$'\e[33;01m'
+        BAD=$'\e[31;01m'
+        NORMAL=$'\e[0m'
+        BOLD=$'\e[0;01m'
+        UNDER=$'\e[4m'
+    else
+        GOOD=''
+        WARN=''
+        BAD=''
+        NORMAL=''
+        BOLD=''
+        UNDER=''
+    fi
+}
+
+print_info() {
+    local indent=$1
+    local str=$2
+
+    echo -n "${GOOD} *"
+    for ((x=0; x < $indent; x += 1)) ; do
+        echo -n "  "
+    done
+    echo "${NORMAL} >> ${str}"
+}
+
+callInteractive() {
+    local cmd=$1   ; shift
+    local input=$*
+
+    local execcmd="echo '"
+    for item in ${input[*]} ; do
+        if [ "$item" = '\n' ] ; then
+            item=''
+        fi
+        execcmd=${execcmd}${item}$'\n'
+    done
+    execcmd="${execcmd}' | $cmd"
+
+    eval "${execcmd}"
+}
+
+mediumTest() {
+    local devname=$1
+
+    local ret=$(dd if="$devname" of=/dev/null bs=512 count=1 2>&1)
+    if [ "$?" != "0" ] ; then
+        echo "0: ${ret##*: }"
+        return
+    fi
+
+    echo 1
+}
+
+isMounted() {
+    local devname=$1
+
+    # check the device itself or any of its partition is mounted
+    if [ "x$(grep "^${devname}[0-9]* " /proc/mounts)" != "x" ] ; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+getUuid() {
+    local devname=$1
+
+    local ret=$(blkid -s UUID "$devname")
+    ret=${ret#*\"}
+    ret=${ret%\"*}
+
+    echo "$ret"
+    return 0
+}
+
+getIsoVolumeId() {
+    local isoname=$1
+    local pattern='^Volume id: (.*)'
+
+    local SAVEIFS=$IFS
+    IFS=$'\n'
+    for line in $(isoinfo -d -i "$isoname" 2>&1)
+    do
+        if [[ $line =~ $pattern ]]; then
+            IFS=$SAVEIFS
+            echo "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done
+    IFS=$SAVEIFS
+
+    return 1
+}
+
+extractIso() {
+    local isof=$1
+    local dstdir=$2
+
+    7z x "${isof}" -o"${dstdir}" > /dev/null
+}
+
+installGrubNtldr() {
+    local devname=$1
+    local partname=$2
+    local partuuid=$3
+    local mountdir=$4
+    local grubcfgfile="${mountdir}/grldr/grub2/grub.cfg"
+
+    grub2-install --no-floppy --boot-directory="${mountdir}/grldr" "$devname" > /dev/null
+
+    echo '' > "$grubcfgfile"
+    echo "load_env"                                                        >> "$grubcfgfile"
+    echo ""                                                                >> "$grubcfgfile"
+    echo "set default=0"                                                   >> "$grubcfgfile"
+    echo "set timeout=0"                                                   >> "$grubcfgfile"
+    echo ""                                                                >> "$grubcfgfile"
+    echo "menuentry boot-entry {"                                          >> "$grubcfgfile"
+    echo "    search --no-floppy --set=root --fs-uuid $partuuid"           >> "$grubcfgfile"
+    echo "    ntldr /bootmgr"                                              >> "$grubcfgfile"
+    echo "}"                                                               >> "$grubcfgfile"
+}
+
+usage() {
+    echo 'winiso2usb - create USB boot disk from Microsoft Windows Setup CD/DVD image'
+    echo ''
+    echo 'Usage:'
+    echo '  winiso2usb iso-file dev-name'
+    echo ''
+    echo 'Supports:'
+    echo '  Microsoft Windows Vista'
+    echo '  Microsoft Windows 7'
+    echo ''
+    echo 'You must be root to run this tool.'
+    echo ''
+}
+
+##########################################################
+# main procedure
+
+DEBUG=0
+USECOLOR=1
+
+if [ $(id -u) != "0" ]; then
+    echo "Error: You must run this command as root!"
+    exit 1
+fi
+
+argtemp=`getopt -o t: -n "make-liveusb" -- "$@"`
+if [ $? != 0 ] ; then exit 1 ; fi
+eval set -- "$argtemp"
+while true ; do
+    case "$1" in
+        -t) isotype="$2" ; shift 2 ;;
+        --) shift ; break ;;
+        *) usage ; exit 1 ;;
+    esac
+done
+
+if [ $# -lt 2 ] ; then usage ; exit 1 ; fi
+isoname=$1
+devname=$2
+partname=""
+partlabel=""
+partuuid=""
+mountdir=""
+
+print_info 0 "Argument checking..."
+
+if [ ! -e "$isoname" ] ; then
+    echo "Error: File \"$isoname\" does not exist"
+    exit 1
+fi
+
+if [ ! -e "$devname" ] ; then
+    echo "Error: Device \"$devname\" does not exist"
+    exit 1
+fi
+
+ret=$(isMounted "$devname")
+if [ "$ret" != 0 ] ; then
+    echo "Error: Device \"$devname\" or any of its partitions already mounted, unmount it first"
+    exit 1
+fi
+
+ret=$(mediumTest "$devname")
+if [ "$ret" != 1 ] ; then
+    echo "Error: Device \"$devname\" medium test failed, ${ret#*: }"
+    exit 1
+fi
+
+print_info 0 "Complete."
+
+print_info 0 "Making USB flash disk..."
+
+print_info 1 "Partitioning..."
+
+dd if=/dev/zero of="$devname" bs=512 count=16			# clear mbr and pbr
+fdiskinputs=('o' 'n' 'p' '1' '\n' '\n' 't' '7' 'a' '1' 'w')
+callInteractive "fdisk \"$devname\" > /dev/null" ${fdiskinputs[*]}
+
+print_info 1 "Complete."
+
+print_info 1 "Format NTFS partition..."
+
+partname="${devname}1"
+partlabel="$(getIsoVolumeId $isoname)"
+
+dd if=/dev/zero of="$partname" bs=512 count=1 > /dev/null
+mkfs.ntfs -Q -L "$partlabel" "$partname" > /dev/null
+partuuid="$(getUuid $partname)"
+
+print_info 1 "Complete."
+
+mountdir=`mktemp -d`
+mount -t ntfs-3g "$partname" "$mountdir"
+
+print_info 1 "Copy files from ISO..."
+
+extractIso "$isoname" "$mountdir"
+
+print_info 1 "Complete."
+
+print_info 1 "Installing GRUB as bootloader..."
+
+installGrubNtldr "$devname" "$partname" "$partuuid" "$mountdir"
+
+print_info 1 "Complete."
+
+umount "$partname"
+rmdir "$mountdir"
+
+print_info 0 "Complete."
+
+exit 0
