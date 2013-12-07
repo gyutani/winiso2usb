@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 # Solution description:
 #  1. partition and format the USB stick
@@ -168,7 +168,7 @@ if [ $(id -u) != "0" ]; then
     exit 1
 fi
 
-argtemp=`getopt -o t: -n "make-liveusb" -- "$@"`
+argtemp=`getopt -o t: -n "winiso2usb" -- "$@"`
 if [ $? != 0 ] ; then exit 1 ; fi
 eval set -- "$argtemp"
 while true ; do
