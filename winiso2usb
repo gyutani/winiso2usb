@@ -119,7 +119,7 @@ extractIso() {
     local isof=$1
     local dstdir=$2
 
-    7z x "${isof}" -o"${dstdir}" > /dev/null
+    7zr x "${isof}" -o"${dstdir}" > /dev/null
 }
 
 installGrubNtldr() {
@@ -127,9 +127,9 @@ installGrubNtldr() {
     local partname=$2
     local partuuid=$3
     local mountdir=$4
-    local grubcfgfile="${mountdir}/grldr/grub2/grub.cfg"
+    local grubcfgfile="${mountdir}/grldr/grub/grub.cfg"
 
-    grub2-install --no-floppy --boot-directory="${mountdir}/grldr" "$devname" > /dev/null
+    grub-install --no-floppy --boot-directory="${mountdir}/grldr" "$devname" > /dev/null
 
     echo '' > "$grubcfgfile"
     echo "load_env"                                                        >> "$grubcfgfile"
